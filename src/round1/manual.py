@@ -24,19 +24,18 @@ starting_shells = 2000
 combinations = [['shell-shell']]
 new_combos = []
 
-for i in range(5):
+for i in range(4):
   for combo in combinations:
     for conv in conversions.keys():
       curr_curreny = combo[-1].split('-')[-1]
       # print(f'curr_combo: {combo}, curr_curreny: {curr_curreny}, conv: {conv}, trufiy: {conv[:len(curr_curreny)] == curr_curreny}')
       if conv[:len(curr_curreny)] == curr_curreny:
         new_combos.append(combo + [conv])
-  combinations = new_combos
-  new_combos = []
+  combinations = new_combos[new_combos.index(combo)+1 if combo in new_combos else 0:]
 
 # Calculate the value of each combination
 results = []
-for combo in combinations:
+for combo in new_combos:
   value = starting_shells
   for conv in combo:
     curr_currency = conv.split('-')[0]
@@ -46,11 +45,9 @@ for combo in combinations:
   value *= conversions[next_currency + '-shell']
   results.append((combo, value))
 
-# best_combo = max(results, key=lambda x: x[1])
-# print('Best combination: ', best_combo)
-# print('first value: ', results[0])
-
 # Sort and print the results
 results.sort(key=lambda x: x[1], reverse=True)
 for combo, value in results:
   print(combo, value)
+
+print(f'{len(results)} combinations')
