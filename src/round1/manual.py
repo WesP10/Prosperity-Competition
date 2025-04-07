@@ -46,7 +46,7 @@ for combo in new_combos:
   results.append((combo, value))
 
 # Sort and print the results
-results.sort(key=lambda x: x[1], reverse=True)
+results.sort(key=lambda x: x[1])
 for combo, value in results:
   print(combo, value)
 
