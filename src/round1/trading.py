@@ -43,6 +43,11 @@ class Trader:
             self.ema_prices[product] = None
 
         self.ema_param = 0.5
+        self.past_prices = []
+
+        # Rolling window sizes (in tick units)
+        self.RSI_WINDOW_TICKS = 50   # change to whatever is best profit
+        self.PCR_WINDOW_TICKS = 50   # change to whatever is best profit
 
     def get_position(self, product, state : TradingState):
         return state.position.get(product, 0)    
@@ -102,6 +107,75 @@ class Trader:
         # Update cash
         update_cash()
         return self.cash + get_value_on_positions()
+
+    def update_price_history(self, current_timestamp: int, price: float) -> None:
+        """Append the current (timestamp, price) and prune any too-old data."""
+        self.past_prices.append((current_timestamp, price))
+        # Prune history older than the maximum window needed for our indicators.
+        max_window = max(self.RSI_WINDOW_TICKS, self.PCR_WINDOW_TICKS)
+        self.past_prices = [(ts, p) for ts, p in self.past_prices if current_timestamp - ts <= max_window]
+
+    def compute_modified_rsi(self, current_timestamp: int, current_price: float):
+        """
+        Compute modified RSI as percentage change compared to the price from
+        RSI_WINDOW_TICKS ago.
+        """
+        target_time = current_timestamp - self.RSI_WINDOW_TICKS
+        price_old = None
+        # Look for the oldest price at or before the target_time.
+        for ts, p in self.past_prices:
+            if ts <= target_time:
+                price_old = p
+            else:
+                break
+        if price_old is None:
+            return None
+        return (current_price - price_old) / price_old * 100
+
+    def compute_pcr(self, current_timestamp: int):
+        """
+        Compute the Price Change Ratio (PCR) over the PCR_WINDOW_TICKS.
+        PCR = up_moves / (up_moves + down_moves)
+        """
+        window_start = current_timestamp - self.PCR_WINDOW_TICKS
+        window_prices = [p for ts, p in self.past_prices if ts >= window_start]
+        if len(window_prices) < 2:
+            return None
+        up_moves = 0
+        down_moves = 0
+        for i in range(1, len(window_prices)):
+            if window_prices[i] > window_prices[i - 1]:
+                up_moves += 1
+            elif window_prices[i] < window_prices[i - 1]:
+                down_moves += 1
+        total_moves = up_moves + down_moves
+        if total_moves == 0:
+            return 0.5  # Neutral if no movement
+        return up_moves / total_moves
+
+    def generate_signal(self, current_timestamp: int, current_price: float) -> str:
+        """
+        Combine modified RSI and PCR indicators to produce a trading signal.
+          - 'buy' if RSI < 30 and PCR > 0.7
+          - 'sell' if RSI > 70 and PCR < 0.3
+          - otherwise, 'hold'
+        """
+        rsi_value = self.compute_modified_rsi(current_timestamp, current_price)
+        pcr_value = self.compute_pcr(current_timestamp)
+        if rsi_value is None or pcr_value is None:
+            return "hold"
+
+        rsi_buy_threshold = 30
+        rsi_sell_threshold = 70
+        pcr_bullish_threshold = 0.7
+        pcr_bearish_threshold = 0.3
+
+        if rsi_value < rsi_buy_threshold and pcr_value > pcr_bullish_threshold:
+            return "buy"
+        elif rsi_value > rsi_sell_threshold and pcr_value < pcr_bearish_threshold:
+            return "sell"
+        else:
+            return "hold"
 
     def update_ema_prices(self, state : TradingState):
         """
@@ -169,28 +243,25 @@ class Trader:
         """
         Strategy for KELP
         """
-        position_bananas = self.get_position(KELP, state)
+        current_price = self.get_mid_price(KELP, state)
+        self.update_price_history(state.timestamp, current_price)
 
-        bid_volume = self.position_limit[KELP] - position_bananas
-        ask_volume = - self.position_limit[KELP] - position_bananas
+        position_kelp = self.get_position(KELP, state)
+        signal = self.generate_signal(state.timestamp, current_price)
 
         orders = []
+        bid_volume = self.position_limit[KELP] - position_kelp
+        ask_volume = -self.position_limit[KELP] - position_kelp
 
-        if position_bananas == 0:
-            # Not long nor short
+        # Use the EMA value as the reference price.
+        if signal == "buy":
+            orders.append(Order(KELP, math.floor(self.ema_prices[KELP] - 1), bid_volume))
+        elif signal == "sell":
+            orders.append(Order(KELP, math.ceil(self.ema_prices[KELP] + 1), ask_volume))
+        else:
+            # In a neutral case, place orders on both sides.
             orders.append(Order(KELP, math.floor(self.ema_prices[KELP] - 1), bid_volume))
             orders.append(Order(KELP, math.ceil(self.ema_prices[KELP] + 1), ask_volume))
-        
-        if position_bananas > 0:
-            # Long position
-            orders.append(Order(KELP, math.floor(self.ema_prices[KELP] - 2), bid_volume))
-            orders.append(Order(KELP, math.ceil(self.ema_prices[KELP]), ask_volume))
-
-        if position_bananas < 0:
-            # Short position
-            orders.append(Order(KELP, math.floor(self.ema_prices[KELP]), bid_volume))
-            orders.append(Order(KELP, math.ceil(self.ema_prices[KELP] + 2), ask_volume))
-
         return orders
 
     def run(self, state: TradingState) -> Dict[str, List[Order]]:
