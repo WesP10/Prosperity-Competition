@@ -120,7 +120,7 @@ class Trader:
 
     def squid_strategy(self, state : TradingState) -> List[Order]:
         """
-        Strategy for Squid Ink
+        EMA Strategy for Squid Ink (Volatile XL)
         """
 
         position_bananas = self.get_position(SQUID_INK, state)
@@ -149,7 +149,7 @@ class Trader:
 
     def resin_strategy(self, state : TradingState) -> List[Order]:
         """
-        Strategy for RAINFOREST_RESIN
+        Market-Making Strategy for RAINFOREST_RESIN (Stable)
         """
         orders: list[Order] = []
         order_depth: OrderDepth = state.order_depths[RAINFOREST_RESIN]
@@ -167,7 +167,7 @@ class Trader:
 
     def kelp_strategy(self, state : TradingState) -> List[Order]:
         """
-        Strategy for KELP
+        EMA Strategy for KELP (Volatile M)
         """
         position_bananas = self.get_position(KELP, state)
 
