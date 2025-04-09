@@ -21,10 +21,9 @@ class Trader:
 
     def __init__(self) -> None:
         self.position_limit = {
-            # IDK if they r rly 20
-            RAINFOREST_RESIN : 20,
-            SQUID_INK : 20,
-            KELP : 20,
+            RAINFOREST_RESIN : 50,
+            SQUID_INK : 50,
+            KELP : 50,
         }
 
         self.round = 0
