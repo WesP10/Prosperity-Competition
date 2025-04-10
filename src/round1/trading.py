@@ -43,14 +43,32 @@ class Trader:
             self.ema_prices[product] = None
 
         self.ema_param = {
-            SQUID_INK: .2,
-            RAINFOREST_RESIN: .8,
-            KELP: .5,
-          }
+            SQUID_INK: 0.0115,      # 60 tick half-life
+            RAINFOREST_RESIN: 0.0228,  # 30 tick half-life
+            KELP: 0.0451,           # 15 tick half-life
+        }
 
         # Rolling window sizes (in tick units)
         self.RSI_WINDOW_TICKS = 50   # change to whatever is best profit
         self.PCR_WINDOW_TICKS = 50   # change to whatever is best profit
+
+        # Add these new parameters for dynamic spread calculation
+        self.volatility_window = 50  # Number of ticks to look back for volatility
+        self.min_spread = 1  # Minimum spread to maintain
+        self.max_spread = 5  # Maximum spread to allow
+        self.spread_multiplier = 2.0  # Multiplier for volatility-based spread
+
+        # Add position target parameters
+        self.target_position = 15  # Target position to maintain
+        self.position_penalty_factor = 0.1  # How much to adjust prices based on position deviation
+
+        # Add volatility threshold parameter
+        self.volatility_threshold = 3.0  # Adjust this value based on testing
+        self.volatility_cooldown = 5  # Number of ticks to wait after high volatility
+        self.last_high_volatility_tick = -1  # Initialize the tracking variable
+        self.high_volatility_price = None  # Price when high volatility was detected
+        self.high_volatility_direction = None  # 'up' or 'down' based on price movement
+        self.high_volatility_position = 0  # Position we took during high volatility
 
     def get_position(self, product, state : TradingState):
         return state.position.get(product, 0)    
@@ -195,33 +213,85 @@ class Trader:
             else:
                 self.ema_prices[product] = self.ema_param[product] * mid_price + (1-self.ema_param[product]) * self.ema_prices[product]
 
+    def calculate_volatility(self, product: str, state: TradingState) -> float:
+        """
+        Calculate the volatility of a product based on recent price movements.
+        Returns the standard deviation of recent price changes.
+        """
+        if len(self.past_prices[product]) < 2:
+            return 0.0
+        
+        # Get recent prices within the volatility window
+        recent_prices = [p for ts, p in self.past_prices[product][-self.volatility_window:]]
+        
+        if len(recent_prices) < 2:
+            return 0.0
+        
+        # Calculate price changes
+        price_changes = [abs(recent_prices[i] - recent_prices[i-1]) 
+                        for i in range(1, len(recent_prices))]
+        
+        # Calculate standard deviation of price changes
+        mean = sum(price_changes) / len(price_changes)
+        variance = sum((x - mean) ** 2 for x in price_changes) / len(price_changes)
+        return math.sqrt(variance) * 100
+
     def squid_strategy(self, state : TradingState) -> List[Order]:
         """
-        EMA Strategy for Squid Ink (Extremely Volatile)
+        Market-making Strategy for SQUID_INK with volatility-based trading
         """
-
-        position_bananas = self.get_position(SQUID_INK, state)
-
-        bid_volume = self.position_limit[SQUID_INK] - position_bananas
-        ask_volume = - self.position_limit[SQUID_INK] - position_bananas
-
-        orders = []
-
-        if position_bananas == 0:
-            # Not long nor short
-            orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK] - 1), bid_volume))
-            orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK] + 1), ask_volume))
+        position_squid = self.get_position(SQUID_INK, state)
+        current_price = self.get_mid_price(SQUID_INK, state)
+        volatility = self.calculate_volatility(SQUID_INK, state)
         
-        if position_bananas > 0:
-            # Long position
-            orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK] - 2), bid_volume))
-            orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK]), ask_volume))
-
-        if position_bananas < 0:
-            # Short position
-            orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK]), bid_volume))
-            orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK] + 2), ask_volume))
-
+        orders = []
+        
+        # Check if we're in a cooldown period
+        if self.last_high_volatility_tick != -1 and state.timestamp - self.last_high_volatility_tick < self.volatility_cooldown * 100:
+            return orders
+        
+        # Check if we're currently holding a volatility-based position
+        if self.high_volatility_price is not None:
+            # Calculate price change since high volatility was detected
+            price_change = (current_price - self.high_volatility_price) / self.high_volatility_price * 100
+            
+            # If price has returned to original level, exit position
+            if abs(price_change) < 5:  # 5% threshold to exit
+                if self.high_volatility_direction == 'up' and position_squid > 0:
+                    orders.append(Order(SQUID_INK, math.floor(current_price - 1), -position_squid))
+                elif self.high_volatility_direction == 'down' and position_squid < 0:
+                    orders.append(Order(SQUID_INK, math.ceil(current_price + 1), -position_squid))
+                # Reset tracking variables
+                self.high_volatility_price = None
+                self.high_volatility_direction = None
+                self.high_volatility_position = 0
+                return orders
+        
+        # Check for new high volatility event
+        if volatility > self.volatility_threshold and self.high_volatility_price is None:
+            self.last_high_volatility_tick = state.timestamp
+            self.high_volatility_price = current_price
+            
+            # Determine direction of volatility spike
+            if len(self.past_prices[SQUID_INK]) >= 2:
+                prev_price = self.past_prices[SQUID_INK][-1][1]
+                price_change = (current_price - prev_price) / prev_price * 100
+                
+                if price_change > 5:  # 30% upward spike
+                    self.high_volatility_direction = 'up'
+                    # Take short position
+                    max_short = -self.position_limit[SQUID_INK] - position_squid
+                    if max_short < 0:
+                        orders.append(Order(SQUID_INK, math.ceil(current_price + 1), max_short))
+                        self.high_volatility_position = max_short
+                elif price_change < 5:  # 30% downward spike
+                    self.high_volatility_direction = 'down'
+                    # Take long position
+                    max_long = self.position_limit[SQUID_INK] - position_squid
+                    if max_long > 0:
+                        orders.append(Order(SQUID_INK, math.floor(current_price - 1), max_long))
+                        self.high_volatility_position = max_long
+        
         return orders
 
     def resin_strategy(self, state : TradingState) -> List[Order]:
@@ -284,10 +354,10 @@ class Trader:
                 if trade.timestamp == state.timestamp - 100:
                     print(trade)
 
-        print(f"\tCash {self.cash}")
+        print(f"Cash {self.cash}")
         for product in PRODUCTS:
-            print(f"\tProduct {product}, Position {self.get_position(product, state)}, Midprice {self.get_mid_price(product, state)}, Value {self.get_value_on_product(product, state)}, EMA {self.ema_prices[product]}")
-        print(f"\tPnL {pnl}")
+            print(f" Product {product}, Position {self.get_position(product, state)}, Midprice {self.get_mid_price(product, state)}, Value {self.get_value_on_product(product, state)}, EMA {self.ema_prices[product]}")
+        print(f" PnL {pnl}")
         
         result = {}
 
@@ -298,12 +368,12 @@ class Trader:
             print("Error in squid strategy")
             print(e)
 
-        # RAINFOREST_RESIN STRATEGY
-        try:
-            result[RAINFOREST_RESIN] = self.resin_strategy(state)
-        except Exception as e:
-            print("Error in resin strategy")
-            print(e)
+        # # RAINFOREST_RESIN STRATEGY
+        # try:
+        #     result[RAINFOREST_RESIN] = self.resin_strategy(state)
+        # except Exception as e:
+        #     print("Error in resin strategy")
+        #     print(e)
 
         # KELP STRATEGY
         try:
