@@ -70,6 +70,8 @@ class Trader:
         self.high_volatility_direction = None  # 'up' or 'down' based on price movement
         self.high_volatility_position = 0  # Position we took during high volatility
 
+        self.volatility = 0.0  # Initialize volatility variable
+
     def get_position(self, product, state : TradingState):
         return state.position.get(product, 0)    
 
@@ -129,14 +131,14 @@ class Trader:
         update_cash()
         return self.cash + get_value_on_positions()
 
-    def update_price_history(self, current_timestamp: int, price: float) -> None:
+    def update_price_history(self, current_timestamp: int, price: float, product) -> None:
         """Append the current (timestamp, price) and prune any too-old data."""
-        self.past_prices[KELP].append((current_timestamp, price))
+        self.past_prices[product].append((current_timestamp, price))
         # Prune history older than the maximum window needed for our indicators.
         max_window = max(self.RSI_WINDOW_TICKS, self.PCR_WINDOW_TICKS)
-        self.past_prices[KELP] = [(ts, p) for ts, p in self.past_prices[KELP] if current_timestamp - ts <= max_window]
+        self.past_prices[product] = [(ts, p) for ts, p in self.past_prices[KELP] if current_timestamp - ts <= max_window]
 
-    def compute_modified_rsi(self, current_timestamp: int, current_price: float):
+    def compute_modified_rsi(self, current_timestamp: int, current_price: float, product):
         """
         Compute modified RSI as percentage change compared to the price from
         RSI_WINDOW_TICKS ago.
@@ -144,7 +146,7 @@ class Trader:
         target_time = current_timestamp - self.RSI_WINDOW_TICKS
         price_old = None
         # Look for the oldest price at or before the target_time.
-        for ts, p in self.past_prices[KELP]:
+        for ts, p in self.past_prices[product]:
             if ts <= target_time:
                 price_old = p
             else:
@@ -153,13 +155,13 @@ class Trader:
             return None
         return (current_price - price_old) / price_old * 100
 
-    def compute_pcr(self, current_timestamp: int):
+    def compute_pcr(self, current_timestamp: int, product):
         """
         Compute the Price Change Ratio (PCR) over the PCR_WINDOW_TICKS.
         PCR = up_moves / (up_moves + down_moves)
         """
         window_start = current_timestamp - self.PCR_WINDOW_TICKS
-        window_prices = [p for ts, p in self.past_prices[KELP] if ts >= window_start]
+        window_prices = [p for ts, p in self.past_prices[product] if ts >= window_start]
         if len(window_prices) < 2:
             return None
         up_moves = 0
@@ -174,15 +176,15 @@ class Trader:
             return 0.5  # Neutral if no movement
         return up_moves / total_moves
 
-    def generate_signal(self, current_timestamp: int, current_price: float) -> str:
+    def generate_signal(self, current_timestamp: int, current_price: float, product) -> str:
         """
         Combine modified RSI and PCR indicators to produce a trading signal.
           - 'buy' if RSI < 30 and PCR > 0.7
           - 'sell' if RSI > 70 and PCR < 0.3
           - otherwise, 'hold'
         """
-        rsi_value = self.compute_modified_rsi(current_timestamp, current_price)
-        pcr_value = self.compute_pcr(current_timestamp)
+        rsi_value = self.compute_modified_rsi(current_timestamp, current_price, product)
+        pcr_value = self.compute_pcr(current_timestamp, product)
         if rsi_value is None or pcr_value is None:
             return "hold"
 
@@ -241,57 +243,43 @@ class Trader:
         Market-making Strategy for SQUID_INK with volatility-based trading
         """
         position_squid = self.get_position(SQUID_INK, state)
-        current_price = self.get_mid_price(SQUID_INK, state)
-        volatility = self.calculate_volatility(SQUID_INK, state)
-        
+        self.volatility = self.calculate_volatility(SQUID_INK, state)
+
+        current_price = self.get_mid_price(KELP, state)
+        self.update_price_history(state.timestamp, current_price, KELP)
+
+        position_kelp = self.get_position(KELP, state)
+        signal = self.generate_signal(state.timestamp, current_price, KELP)
+
+        bid_volume = self.position_limit[SQUID_INK] - position_squid
+        ask_volume = - self.position_limit[SQUID_INK] - position_squid
+
         orders = []
+
+        if signal == "buy":
+            orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK] - 1), bid_volume))
+        elif signal == "sell": 
+            orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK] + 1), ask_volume))
+        else:
+            # In a neutral case, place orders on both sides.
+            orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK] - 1), bid_volume))
+            orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK] + 1), ask_volume))
+
+        # if position_squid == 0:
+        #     # Not long nor short
+        #     orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK] - 1), bid_volume))
+        #     orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK] + 1), ask_volume))
         
-        # Check if we're in a cooldown period
-        if self.last_high_volatility_tick != -1 and state.timestamp - self.last_high_volatility_tick < self.volatility_cooldown * 100:
-            return orders
-        
-        # Check if we're currently holding a volatility-based position
-        if self.high_volatility_price is not None:
-            # Calculate price change since high volatility was detected
-            price_change = (current_price - self.high_volatility_price) / self.high_volatility_price * 100
-            
-            # If price has returned to original level, exit position
-            if abs(price_change) < 5:  # 5% threshold to exit
-                if self.high_volatility_direction == 'up' and position_squid > 0:
-                    orders.append(Order(SQUID_INK, math.floor(current_price - 1), -position_squid))
-                elif self.high_volatility_direction == 'down' and position_squid < 0:
-                    orders.append(Order(SQUID_INK, math.ceil(current_price + 1), -position_squid))
-                # Reset tracking variables
-                self.high_volatility_price = None
-                self.high_volatility_direction = None
-                self.high_volatility_position = 0
-                return orders
-        
-        # Check for new high volatility event
-        if volatility > self.volatility_threshold and self.high_volatility_price is None:
-            self.last_high_volatility_tick = state.timestamp
-            self.high_volatility_price = current_price
-            
-            # Determine direction of volatility spike
-            if len(self.past_prices[SQUID_INK]) >= 2:
-                prev_price = self.past_prices[SQUID_INK][-1][1]
-                price_change = (current_price - prev_price) / prev_price * 100
-                
-                if price_change > 5:  # 30% upward spike
-                    self.high_volatility_direction = 'up'
-                    # Take short position
-                    max_short = -self.position_limit[SQUID_INK] - position_squid
-                    if max_short < 0:
-                        orders.append(Order(SQUID_INK, math.ceil(current_price + 1), max_short))
-                        self.high_volatility_position = max_short
-                elif price_change < 5:  # 30% downward spike
-                    self.high_volatility_direction = 'down'
-                    # Take long position
-                    max_long = self.position_limit[SQUID_INK] - position_squid
-                    if max_long > 0:
-                        orders.append(Order(SQUID_INK, math.floor(current_price - 1), max_long))
-                        self.high_volatility_position = max_long
-        
+        # if position_squid > 0:
+        #     # Long position
+        #     orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK] - 2), bid_volume))
+        #     orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK]), ask_volume))
+
+        # if position_squid < 0:
+        #     # Short position
+        #     orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK]), bid_volume))
+        #     orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK] + 2), ask_volume))
+
         return orders
 
     def resin_strategy(self, state : TradingState) -> List[Order]:
@@ -317,10 +305,10 @@ class Trader:
         EMA Strategy for KELP (Mildly Volatile)
         """
         current_price = self.get_mid_price(KELP, state)
-        self.update_price_history(state.timestamp, current_price)
+        self.update_price_history(state.timestamp, current_price, KELP)
 
         position_kelp = self.get_position(KELP, state)
-        signal = self.generate_signal(state.timestamp, current_price)
+        signal = self.generate_signal(state.timestamp, current_price, KELP)
 
         orders = []
         bid_volume = self.position_limit[KELP] - position_kelp
@@ -356,7 +344,7 @@ class Trader:
 
         print(f"Cash {self.cash}")
         for product in PRODUCTS:
-            print(f" Product {product}, Position {self.get_position(product, state)}, Midprice {self.get_mid_price(product, state)}, Value {self.get_value_on_product(product, state)}, EMA {self.ema_prices[product]}")
+            print(f" Product {product}, Position {self.get_position(product, state)}, Midprice {self.get_mid_price(product, state)}, Value {self.get_value_on_product(product, state)}, EMA {self.ema_prices[product]}, Volatility {self.volatility}")
         print(f" PnL {pnl}")
         
         result = {}
