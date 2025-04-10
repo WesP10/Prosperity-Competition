@@ -1,7 +1,6 @@
 from typing import Dict, List
-from data.datamodel import OrderDepth, TradingState, Order
-import json
-
+from datamodel import OrderDepth, TradingState, Order
+# from data.datamodel import OrderDepth, TradingState, Order
 
 class Trader:
 
