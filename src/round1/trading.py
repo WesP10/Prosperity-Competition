@@ -42,7 +42,11 @@ class Trader:
         for product in PRODUCTS:
             self.ema_prices[product] = None
 
-        self.ema_param = 0.5
+        self.ema_param = {
+            SQUID_INK: .2,
+            RAINFOREST_RESIN: .8,
+            KELP: .5,
+          }
 
         # Rolling window sizes (in tick units)
         self.RSI_WINDOW_TICKS = 50   # change to whatever is best profit
@@ -112,7 +116,7 @@ class Trader:
         self.past_prices[KELP].append((current_timestamp, price))
         # Prune history older than the maximum window needed for our indicators.
         max_window = max(self.RSI_WINDOW_TICKS, self.PCR_WINDOW_TICKS)
-        self.past_prices = [(ts, p) for ts, p in self.past_prices[KELP] if current_timestamp - ts <= max_window]
+        self.past_prices[KELP] = [(ts, p) for ts, p in self.past_prices[KELP] if current_timestamp - ts <= max_window]
 
     def compute_modified_rsi(self, current_timestamp: int, current_price: float):
         """
@@ -189,11 +193,11 @@ class Trader:
             if self.ema_prices[product] is None:
                 self.ema_prices[product] = mid_price
             else:
-                self.ema_prices[product] = self.ema_param * mid_price + (1-self.ema_param) * self.ema_prices[product]
+                self.ema_prices[product] = self.ema_param[product] * mid_price + (1-self.ema_param[product]) * self.ema_prices[product]
 
     def squid_strategy(self, state : TradingState) -> List[Order]:
         """
-        EMA Strategy for Squid Ink (Volatile XL)
+        EMA Strategy for Squid Ink (Extremely Volatile)
         """
 
         position_bananas = self.get_position(SQUID_INK, state)
@@ -240,7 +244,7 @@ class Trader:
 
     def kelp_strategy(self, state : TradingState) -> List[Order]:
         """
-        EMA Strategy for KELP (Volatile M)
+        EMA Strategy for KELP (Mildly Volatile)
         """
         current_price = self.get_mid_price(KELP, state)
         self.update_price_history(state.timestamp, current_price)
@@ -291,21 +295,21 @@ class Trader:
         try:
             result[SQUID_INK] = self.squid_strategy(state)
         except Exception as e:
-            print("Error in pearls strategy")
+            print("Error in squid strategy")
             print(e)
 
         # RAINFOREST_RESIN STRATEGY
         try:
             result[RAINFOREST_RESIN] = self.resin_strategy(state)
         except Exception as e:
-            print("Error in bananas strategy")
+            print("Error in resin strategy")
             print(e)
 
         # KELP STRATEGY
         try:
             result[KELP] = self.kelp_strategy(state)
         except Exception as e:
-            print("Error in apples strategy")
+            print("Error in kelp strategy")
             print(e)
                 
         traderData = state.traderData + "1"
