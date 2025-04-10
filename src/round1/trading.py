@@ -136,7 +136,9 @@ class Trader:
         self.past_prices[product].append((current_timestamp, price))
         # Prune history older than the maximum window needed for our indicators.
         max_window = max(self.RSI_WINDOW_TICKS, self.PCR_WINDOW_TICKS)
-        self.past_prices[product] = [(ts, p) for ts, p in self.past_prices[KELP] if current_timestamp - ts <= max_window]
+        # Keep only the last max_window ticks of data.
+        self.past_prices[product] = self.past_prices[product][-max_window:]
+        # self.past_prices[product] = [(ts, p) for ts, p in self.past_prices[product] if current_timestamp - ts <= max_window]
 
     def compute_modified_rsi(self, current_timestamp: int, current_price: float, product):
         """
@@ -220,6 +222,8 @@ class Trader:
         Calculate the volatility of a product based on recent price movements.
         Returns the standard deviation of recent price changes.
         """
+
+        print(len(self.past_prices[product]))
         if len(self.past_prices[product]) < 2:
             return 0.0
         
@@ -236,50 +240,75 @@ class Trader:
         # Calculate standard deviation of price changes
         mean = sum(price_changes) / len(price_changes)
         variance = sum((x - mean) ** 2 for x in price_changes) / len(price_changes)
+        print(f"Price changes: {price_changes}, Mean: {mean}, Variance: {variance}")
         return math.sqrt(variance) * 100
 
     def squid_strategy(self, state : TradingState) -> List[Order]:
         """
-        Market-making Strategy for SQUID_INK with volatility-based trading
+        Market-making Strategy for SQUID_INK with RSI and PCR indicators
         """
         position_squid = self.get_position(SQUID_INK, state)
+        current_price = self.get_mid_price(SQUID_INK, state)
         self.volatility = self.calculate_volatility(SQUID_INK, state)
-
-        current_price = self.get_mid_price(KELP, state)
-        self.update_price_history(state.timestamp, current_price, KELP)
-
-        position_kelp = self.get_position(KELP, state)
-        signal = self.generate_signal(state.timestamp, current_price, KELP)
-
-        bid_volume = self.position_limit[SQUID_INK] - position_squid
-        ask_volume = - self.position_limit[SQUID_INK] - position_squid
-
-        orders = []
-
-        if signal == "buy":
-            orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK] - 1), bid_volume))
-        elif signal == "sell": 
-            orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK] + 1), ask_volume))
-        else:
-            # In a neutral case, place orders on both sides.
-            orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK] - 1), bid_volume))
-            orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK] + 1), ask_volume))
-
-        # if position_squid == 0:
-        #     # Not long nor short
-        #     orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK] - 1), bid_volume))
-        #     orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK] + 1), ask_volume))
+        self.update_price_history(state.timestamp, current_price, SQUID_INK)
         
-        # if position_squid > 0:
-        #     # Long position
-        #     orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK] - 2), bid_volume))
-        #     orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK]), ask_volume))
-
-        # if position_squid < 0:
-        #     # Short position
-        #     orders.append(Order(SQUID_INK, math.floor(self.ema_prices[SQUID_INK]), bid_volume))
-        #     orders.append(Order(SQUID_INK, math.ceil(self.ema_prices[SQUID_INK] + 2), ask_volume))
-
+        # Calculate indicators
+        rsi = self.compute_modified_rsi(state.timestamp, current_price, SQUID_INK)
+        pcr = self.compute_pcr(state.timestamp, SQUID_INK)
+        
+        orders = []
+        
+        # Check if we're in a cooldown period
+        if self.last_high_volatility_tick != -1 and state.timestamp - self.last_high_volatility_tick < self.volatility_cooldown * 100:
+            return orders
+        
+        # Check if we're currently holding a volatility-based position
+        if self.high_volatility_price is not None:
+            # Calculate price change since high volatility was detected
+            price_change = (current_price - self.high_volatility_price) / self.high_volatility_price * 100
+            
+            # Use RSI and PCR to confirm exit conditions
+            should_exit = False
+            if self.high_volatility_direction == 'up' and position_squid > 0:
+                # Exit long position if RSI shows overbought or PCR shows weakening
+                should_exit = (rsi > 70 and pcr < 0.3) or abs(price_change) < 5
+            elif self.high_volatility_direction == 'down' and position_squid < 0:
+                # Exit short position if RSI shows oversold or PCR shows weakening
+                should_exit = (rsi < -70 and pcr > 0.7) or abs(price_change) < 5
+                
+            if should_exit:
+                orders.append(Order(SQUID_INK, math.floor(current_price - 1), -position_squid))
+                self.high_volatility_price = None
+                self.high_volatility_direction = None
+                self.high_volatility_position = 0
+                return orders
+        
+        # Check for new high volatility event
+        if self.volatility > self.volatility_threshold and self.high_volatility_price is None:
+            self.last_high_volatility_tick = state.timestamp
+            self.high_volatility_price = current_price
+            
+            # Use RSI and PCR to confirm entry conditions
+            if len(self.past_prices[SQUID_INK]) >= 2:
+                prev_price = self.past_prices[SQUID_INK][-1][1]
+                price_change = (current_price - prev_price) / prev_price * 100
+                
+                # Enter short if price spiked up AND RSI shows overbought AND PCR shows weakening
+                if price_change > 30 and rsi > 70 and pcr < 0.3:
+                    self.high_volatility_direction = 'up'
+                    max_short = -self.position_limit[SQUID_INK] - position_squid
+                    if max_short < 0:
+                        orders.append(Order(SQUID_INK, math.ceil(current_price + 1), max_short))
+                        self.high_volatility_position = max_short
+                
+                # Enter long if price dropped AND RSI shows oversold AND PCR shows strengthening
+                elif price_change < -30 and rsi < -70 and pcr > 0.7:
+                    self.high_volatility_direction = 'down'
+                    max_long = self.position_limit[SQUID_INK] - position_squid
+                    if max_long > 0:
+                        orders.append(Order(SQUID_INK, math.floor(current_price - 1), max_long))
+                        self.high_volatility_position = max_long
+        
         return orders
 
     def resin_strategy(self, state : TradingState) -> List[Order]:
@@ -350,11 +379,11 @@ class Trader:
         result = {}
 
         # SQUID_INK STRATEGY
-        try:
-            result[SQUID_INK] = self.squid_strategy(state)
-        except Exception as e:
-            print("Error in squid strategy")
-            print(e)
+        # try:
+        #     result[SQUID_INK] = self.squid_strategy(state)
+        # except Exception as e:
+        #     print("Error in squid strategy")
+        #     print(e)
 
         # # RAINFOREST_RESIN STRATEGY
         # try:
