@@ -1,7 +1,7 @@
 from typing import Dict, List
-from data.datamodel import OrderDepth, TradingState, Order
+# from data.datamodel import OrderDepth, TradingState, Order
+from datamodel import OrderDepth, TradingState, Order
 import math
-import json
 
 SUBMISSION = "SUBMISSION"
 RAINFOREST_RESIN = "RAINFOREST_RESIN"
