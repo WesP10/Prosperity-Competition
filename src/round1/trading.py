@@ -43,7 +43,6 @@ class Trader:
             self.ema_prices[product] = None
 
         self.ema_param = 0.5
-        self.past_prices = []
 
         # Rolling window sizes (in tick units)
         self.RSI_WINDOW_TICKS = 50   # change to whatever is best profit
@@ -110,10 +109,10 @@ class Trader:
 
     def update_price_history(self, current_timestamp: int, price: float) -> None:
         """Append the current (timestamp, price) and prune any too-old data."""
-        self.past_prices.append((current_timestamp, price))
+        self.past_prices[KELP].append((current_timestamp, price))
         # Prune history older than the maximum window needed for our indicators.
         max_window = max(self.RSI_WINDOW_TICKS, self.PCR_WINDOW_TICKS)
-        self.past_prices = [(ts, p) for ts, p in self.past_prices if current_timestamp - ts <= max_window]
+        self.past_prices = [(ts, p) for ts, p in self.past_prices[KELP] if current_timestamp - ts <= max_window]
 
     def compute_modified_rsi(self, current_timestamp: int, current_price: float):
         """
@@ -123,7 +122,7 @@ class Trader:
         target_time = current_timestamp - self.RSI_WINDOW_TICKS
         price_old = None
         # Look for the oldest price at or before the target_time.
-        for ts, p in self.past_prices:
+        for ts, p in self.past_prices[KELP]:
             if ts <= target_time:
                 price_old = p
             else:
@@ -138,7 +137,7 @@ class Trader:
         PCR = up_moves / (up_moves + down_moves)
         """
         window_start = current_timestamp - self.PCR_WINDOW_TICKS
-        window_prices = [p for ts, p in self.past_prices if ts >= window_start]
+        window_prices = [p for ts, p in self.past_prices[KELP] if ts >= window_start]
         if len(window_prices) < 2:
             return None
         up_moves = 0
